@@ -534,6 +534,28 @@ void Maxwell3D::DumpRecentWrites(u32 method) {
     }
 }
 
+void Maxwell3D::DumpMeshDrawHistory(u32 count, bool indexed) {
+    LOG_WARNING(HW_GPU,
+                "Mesh draw count={} indexed={} vertex first={} count={} index first={} count={} "
+                "base vertex={} base instance={} mesh regs {:#x} {:#x} {:#x} {:#x}",
+                count, indexed, regs.vertex_buffer.first, regs.vertex_buffer.count,
+                regs.index_buffer.first, regs.index_buffer.count, regs.global_base_vertex_index,
+                regs.global_base_instance_index, regs.reg_array[Regs::MeshControl],
+                regs.reg_array[Regs::MeshShaderA], regs.reg_array[Regs::MeshShaderB],
+                regs.reg_array[Regs::MeshInitShader]);
+    if (!record_write_history) {
+        LOG_WARNING(HW_GPU, "  (EDEN_NX2_3D_HISTORY=1 adds the writes before it)");
+        return;
+    }
+    for (size_t i = 0; i < recent_writes.size(); ++i) {
+        const auto& w = recent_writes[(recent_write_index + i) % recent_writes.size()];
+        if (w.amount != 0) {
+            LOG_WARNING(HW_GPU, "  write {:#x} (byte {:#x}) = {:#x} amount {} pending {}", w.method,
+                        w.method * 4, w.argument, w.amount, w.pending);
+        }
+    }
+}
+
 void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
     RecordWrite(method, amount ? base_start[0] : 0, amount, methods_pending);
     // Methods after 0xE00 are special, they're actually triggers for some microcode that was

@@ -341,6 +341,15 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
     draw_state.draw_element_count =
         draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
+    // EDEN_NX2_MESH_TRACE: dump the writes behind the first task/mesh draws, empty and not.
+    if (static const bool mesh_trace = std::getenv("EDEN_NX2_MESH_TRACE") != nullptr;
+        mesh_trace && maxwell3d.regs.IsMeshEnabled()) [[unlikely]] {
+        static u32 empty_dumps{}, drawn_dumps{};
+        const bool empty = draw_state.draw_element_count == 0;
+        if ((empty && empty_dumps++ < 6) || (!empty && drawn_dumps++ < 3)) {
+            maxwell3d.DumpMeshDrawHistory(draw_state.draw_element_count, draw_indexed);
+        }
+    }
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);

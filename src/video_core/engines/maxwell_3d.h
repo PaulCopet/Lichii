@@ -3351,7 +3351,7 @@ private:
         u32 amount;
         u32 pending;
     };
-    std::array<RecentWrite, 48> recent_writes{};
+    std::array<RecentWrite, 96> recent_writes{};
     size_t recent_write_index = 0;
     const bool record_write_history{
 #ifdef NDEBUG
@@ -3367,6 +3367,8 @@ private:
         recent_writes[recent_write_index++ % recent_writes.size()] = {method, argument, amount, pending};
     }
     void DumpRecentWrites(u32 method);
+    /// EDEN_NX2_MESH_TRACE: the register writes that led to a task/mesh draw (diagnostic).
+    void DumpMeshDrawHistory(u32 count, bool indexed);
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
 
