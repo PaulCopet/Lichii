@@ -16,6 +16,9 @@
 #include <limits>
 #include <boost/container/small_vector.hpp>
 
+#include <atomic>
+#include <cstdlib>
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "shader_recompiler/byte_addressed_image.h"
@@ -394,6 +397,20 @@ bool IsMemoryLoad(IR::Opcode opcode) {
     }
 }
 
+// EDEN_NX2_HANDLE_SKIP_CONDITIONS (experimental): a texture handle is an integer word, so the
+// searches for its constant buffer do not follow conditions or floating-point values. Without it,
+// a handle picked per pixel (shadow cascades) could be "found" in a distance used by the choice.
+bool SkipHandleOperand(const IR::Value& value) {
+    static const bool skip = std::getenv("EDEN_NX2_HANDLE_SKIP_CONDITIONS") != nullptr;
+    if (!skip || value.IsImmediate()) return false;
+    switch (value.Type()) {
+    case IR::Type::U1: case IR::Type::F16: case IR::Type::F32: case IR::Type::F64:
+        return true;
+    default:
+        return false;
+    }
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
     // A value loaded from memory is not a constant buffer word, whatever its address is built
     // from: the search does not look into a load's operands (a handle read from a storage
@@ -417,7 +434,7 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
         }
         for (size_t arg = inst->NumArgs(); arg--;) {
             const IR::Value arg_value{ResolveConditionalPhi(inst->Arg(arg), block)};
-            if (arg_value.IsImmediate()) {
+            if (arg_value.IsImmediate() || SkipHandleOperand(arg_value)) {
                 continue;
             }
             const IR::Inst* const arg_inst{arg_value.InstRecursive()};
@@ -923,6 +940,27 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
+// EDEN_NX2_RENDER_TRACE: report how each bindless handle was resolved (first 256 per run).
+void TraceBindless(Environment& env, const IR::Inst& inst, const char* route, const ConstBufferAddr* addr) {
+    static const bool enabled = std::getenv("EDEN_NX2_RENDER_TRACE") != nullptr;
+    static std::atomic<u32> traces{};
+    if (!enabled || traces.fetch_add(1, std::memory_order_relaxed) >= 256) return;
+    const IR::Value handle{inst.Arg(0)};
+    const auto root = handle.IsImmediate() ? IR::Opcode::Void : handle.InstRecursive()->GetOpcode();
+    if (addr) {
+        LOG_WARNING(Shader, "Bindless handle: start={:#x} stage={} op={} route={} root={} cbuf={}:{:#x} "
+                    "value={:#x} secondary={} {}:{:#x} count={} program={}",
+                    env.StartAddress(), static_cast<u32>(env.ShaderStage()), inst.GetOpcode(), route, root,
+                    addr->index, addr->offset, addr->handle_program == ~0U ? ReadCbufCached(env, addr->index, addr->offset) : 0U,
+                    addr->has_secondary, addr->secondary_index, addr->secondary_offset, addr->count,
+                    addr->handle_program);
+    } else {
+        LOG_WARNING(Shader, "Bindless handle: start={:#x} stage={} op={} route={} root={} failure={}",
+                    env.StartAddress(), static_cast<u32>(env.ShaderStage()), inst.GetOpcode(), route, root,
+                    g_handle_failure);
+    }
+}
+
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
@@ -930,6 +968,7 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
 
         if (track_addr) {
             addr = *track_addr;
+            TraceBindless(env, inst, "track", &addr);
         } else {
             // Read from a storage buffer (a handle table): computed for each draw.
             std::vector<u32> code;
@@ -941,11 +980,16 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                 const std::optional<ConstBufferAddr> legacy{IR::BreadthFirstSearch(inst.Arg(0),
                     [&env, &host_info, block](const IR::Inst* candidate) {
                         return TryGetConstBuffer(candidate, env, host_info, block);
-                    }, [&](IR::Value operand) { return ResolveConditionalPhi(operand, block); })};
+                    }, [&](IR::Value operand) {
+                        const IR::Value resolved{ResolveConditionalPhi(operand, block)};
+                        return SkipHandleOperand(resolved) ? IR::Value{0U} : resolved;
+                    })};
+                TraceBindless(env, inst, "program-failed", nullptr);
                 if (!legacy) {
                     throw NotImplementedException("Failed to track bindless texture constant buffer (stopped at {}, budget {})",
                                                   g_handle_failure, budget);
                 }
+                TraceBindless(env, inst, "legacy", &*legacy);
                 return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block};
             }
             auto& programs{*g_handle_programs};
@@ -966,6 +1010,7 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                 .has_secondary = false,
                 .handle_program = static_cast<u32>(it - programs.begin()),
             };
+            TraceBindless(env, inst, "program", &addr);
         }
     } else {
         addr = ConstBufferAddr{
