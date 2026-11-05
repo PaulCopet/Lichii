@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <string_view>
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -940,11 +941,13 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
-// EDEN_NX2_RENDER_TRACE: report how each bindless handle was resolved (first 256 per run).
+// EDEN_NX2_RENDER_TRACE: report how each bindless handle was resolved (first 1024 per run). Per-draw
+// handle programs are left out: the renderer reports the ones that evaluate to 0.
 void TraceBindless(Environment& env, const IR::Inst& inst, const char* route, const ConstBufferAddr* addr) {
     static const bool enabled = std::getenv("EDEN_NX2_RENDER_TRACE") != nullptr;
     static std::atomic<u32> traces{};
-    if (!enabled || traces.fetch_add(1, std::memory_order_relaxed) >= 256) return;
+    if (!enabled || std::string_view{route} == "program" ||
+        traces.fetch_add(1, std::memory_order_relaxed) >= 1024) return;
     const IR::Value handle{inst.Arg(0)};
     const auto root = handle.IsImmediate() ? IR::Opcode::Void : handle.InstRecursive()->GetOpcode();
     if (addr) {
