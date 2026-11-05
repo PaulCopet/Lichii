@@ -961,7 +961,11 @@ void TraceBindless(Environment& env, const IR::Inst& inst, const char* route, co
     }
 }
 
+// Set by MakeInst when a bindless handle fell back to the legacy search (a guess, not a proof).
+thread_local bool g_legacy_handle{};
+
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
+    g_legacy_handle = false;
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
@@ -990,6 +994,7 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                                                   g_handle_failure, budget);
                 }
                 TraceBindless(env, inst, "legacy", &*legacy);
+                g_legacy_handle = true;
                 return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block};
             }
             auto& programs{*g_handle_programs};
@@ -1220,7 +1225,21 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (!IsTextureInstruction(inst)) {
                 continue;
             }
-            to_replace.push_back(MakeInst(env, block, inst, host_info));
+            TextureInst texture_inst{MakeInst(env, block, inst, host_info)};
+            // EDEN_NX2_UNRESOLVED_SHADOW_LIT (workaround): a depth comparison whose handle only the
+            // legacy search found reads an unrelated word (Ocarina's per-light shadow maps come
+            // from a light list in memory), so the shader sees garbage: flickering shadows on
+            // NVIDIA, a black scene on AMD. Answer "lit" instead; those lights cast no shadow.
+            static const bool shadow_lit = std::getenv("EDEN_NX2_UNRESOLVED_SHADOW_LIT") != nullptr;
+            const IR::Opcode opcode{inst.GetOpcode()};
+            if (shadow_lit && g_legacy_handle &&
+                (opcode == IR::Opcode::BindlessImageSampleDrefImplicitLod ||
+                 opcode == IR::Opcode::BindlessImageSampleDrefExplicitLod) &&
+                !inst.GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
+                inst.ReplaceUsesWith(IR::Value{1.0f});
+                continue;
+            }
+            to_replace.push_back(texture_inst);
         }
     }
     // Sort instructions to visit textures by constant buffer index, then by offset
